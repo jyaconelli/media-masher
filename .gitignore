@@ -49,7 +49,9 @@ build/
 # generated assets
 assets/
 *.jpeg
+*.jpg
 *.mp4
+*.png
 
 # Mac files
 .DS_Store

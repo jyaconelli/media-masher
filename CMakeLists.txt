@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(video_manipulator)
+project(media_masher)
 
 # Set C++ Standard
 set(CMAKE_CXX_STANDARD 17)
@@ -14,10 +14,10 @@ include_directories(include)
 include_directories(modules)
 
 # Add source files
-add_executable(video_manipulator
+add_executable(media_masher
     src/main.cpp
     modules/GrayscaleManipulator.h
 )
 
 # Link OpenCV libraries
-target_link_libraries(video_manipulator ${OpenCV_LIBS})
+target_link_libraries(media_masher ${OpenCV_LIBS})

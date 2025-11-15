@@ -1,12 +1,17 @@
 #include <opencv2/opencv.hpp>
-#include <iostream>
-#include <queue>
-#include <mutex>
+#include <algorithm>
+#include <chrono>
 #include <condition_variable>
+#include <cctype>
+#include <iostream>
+#include <mutex>
+#include <queue>
+#include <sstream>
+#include <string>
 #include <thread>
+#include <vector>
 #include "BlockReplaceManipulator.h"
 #include "LinearDistanceMetric.h"
-#include <chrono>
 
 // Comparator for priority queue: Compare only the int part of the pair
 auto frameComparator = [](const std::pair<int, cv::Mat> &a, const std::pair<int, cv::Mat> &b)
@@ -26,6 +31,31 @@ std::condition_variable queueCondition;
 std::priority_queue<std::pair<int, cv::Mat>, std::vector<std::pair<int, cv::Mat>>, decltype(frameComparator)> outputQueue(frameComparator);
 std::mutex outputMutex;
 std::condition_variable outputCondition;
+
+std::string trim(const std::string &input)
+{
+  const auto start = input.find_first_not_of(" \t\n\r");
+  if (start == std::string::npos)
+  {
+    return "";
+  }
+  const auto end = input.find_last_not_of(" \t\n\r");
+  return input.substr(start, end - start + 1);
+}
+
+bool parseIntArgument(const std::string &value, const char *name, int &result)
+{
+  try
+  {
+    result = std::stoi(value);
+    return true;
+  }
+  catch (const std::exception &)
+  {
+    std::cerr << "Error: " << name << " must be an integer. Received '" << value << "'." << std::endl;
+    return false;
+  }
+}
 
 // Producer: Reads frames and adds them to the queue
 void frameProducer(cv::VideoCapture &cap, int &frameIndex, bool &finished)
@@ -146,28 +176,83 @@ void outputWriter(cv::VideoWriter &writer, bool &finished)
 
 int main(int argc, char *argv[])
 {
-  // Check arguments
-  if (argc < 6)
+  std::vector<std::string> positionalArgs;
+  positionalArgs.reserve(argc);
+  bool imageMode = false;
+
+  for (int i = 1; i < argc; ++i)
   {
+    std::string arg = argv[i];
+    if (arg == "--image")
+    {
+      imageMode = true;
+      continue;
+    }
+    positionalArgs.push_back(arg);
+  }
+
+  auto printUsage = [&](const std::string &errorMessage)
+  {
+    if (!errorMessage.empty())
+    {
+      std::cerr << errorMessage << std::endl;
+    }
     std::cerr << "Usage: " << argv[0]
-              << " <video_file_path> <image_list_comma_separated> <output_file_path> <block_width> <block_height>"
+              << " [--image] <input_path> <ref_image_1[,ref_image_2...]> [additional_ref_images...] <output_file_path> <block_width> <block_height>"
               << std::endl;
+    std::cerr << "You can provide reference images as a single comma-separated argument or as multiple positional arguments." << std::endl;
+    std::cerr << "Add --image to read a single image and output a PNG instead of processing a video." << std::endl;
+  };
+
+  if (positionalArgs.size() < 5)
+  {
+    printUsage("Error: Missing required arguments.");
     return -1;
   }
 
-  std::string videoFilePath = argv[1];
-  std::string imageList = argv[2];
-  std::string outputFilePath = argv[3];
-  int blockWidth = std::stoi(argv[4]);
-  int blockHeight = std::stoi(argv[5]);
+  std::string blockHeightStr = positionalArgs.back();
+  positionalArgs.pop_back();
+  std::string blockWidthStr = positionalArgs.back();
+  positionalArgs.pop_back();
+  std::string outputFilePath = positionalArgs.back();
+  positionalArgs.pop_back();
 
-  // Parse image paths
-  std::vector<std::string> imagePaths;
-  std::stringstream ss(imageList);
-  std::string imagePath;
-  while (std::getline(ss, imagePath, ','))
+  if (positionalArgs.size() < 2)
   {
-    imagePaths.push_back(imagePath);
+    printUsage("Error: Missing input path or reference images.");
+    return -1;
+  }
+
+  std::string inputPath = positionalArgs.front();
+  std::vector<std::string> referenceArgs(positionalArgs.begin() + 1, positionalArgs.end());
+
+  int blockWidth = 0;
+  int blockHeight = 0;
+  if (!parseIntArgument(blockWidthStr, "block_width", blockWidth) || !parseIntArgument(blockHeightStr, "block_height", blockHeight))
+  {
+    return -1;
+  }
+
+  // Parse image paths (supports comma-separated values and individual arguments)
+  std::vector<std::string> imagePaths;
+  for (const auto &arg : referenceArgs)
+  {
+    std::stringstream ss(arg);
+    std::string token;
+    while (std::getline(ss, token, ','))
+    {
+      token = trim(token);
+      if (!token.empty())
+      {
+        imagePaths.push_back(token);
+      }
+    }
+  }
+
+  if (imagePaths.empty())
+  {
+    std::cerr << "Error: At least one reference image path must be provided." << std::endl;
+    return -1;
   }
 
   // Load images
@@ -183,11 +268,49 @@ int main(int argc, char *argv[])
     images.push_back(img);
   }
 
+  LinearDistanceMetric distanceMetric;
+
+  if (imageMode)
+  {
+    cv::Mat inputImage = cv::imread(inputPath);
+    if (inputImage.empty())
+    {
+      std::cerr << "Error: Could not load input image: " << inputPath << std::endl;
+      return -1;
+    }
+
+    cv::Size frameSize = inputImage.size();
+    BlockReplaceManipulator blockReplaceManipulator(images, distanceMetric, blockWidth, blockHeight, frameSize);
+
+    auto start = std::chrono::high_resolution_clock::now();
+    cv::Mat manipulatedImage = blockReplaceManipulator.apply(inputImage);
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    std::cout << "[Image Mode] Manipulation completed in " << elapsed.count() << " seconds" << std::endl;
+
+    if (!cv::imwrite(outputFilePath, manipulatedImage))
+    {
+      std::cerr << "Error: Could not write output image: " << outputFilePath << std::endl;
+      return -1;
+    }
+
+    std::string lowered = outputFilePath;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c)
+                   { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
+    if (lowered.size() < 4 || lowered.substr(lowered.size() - 4) != ".png")
+    {
+      std::cout << "[Image Mode] Warning: Output file does not end with .png, but image was saved successfully." << std::endl;
+    }
+
+    std::cout << "Processing complete. Output image saved to: " << outputFilePath << std::endl;
+    return 0;
+  }
+
   // Open video file
-  cv::VideoCapture cap(videoFilePath);
+  cv::VideoCapture cap(inputPath);
   if (!cap.isOpened())
   {
-    std::cerr << "Error: Could not open video file: " << videoFilePath << std::endl;
+    std::cerr << "Error: Could not open video file: " << inputPath << std::endl;
     return -1;
   }
 
@@ -207,7 +330,6 @@ int main(int argc, char *argv[])
 
   // Initialize manipulator
   cv::Size frameSize(frameWidth, frameHeight);
-  LinearDistanceMetric distanceMetric;
   BlockReplaceManipulator blockReplaceManipulator(images, distanceMetric, blockWidth, blockHeight, frameSize);
 
   // Multithreaded frame processing
@@ -220,6 +342,10 @@ int main(int argc, char *argv[])
   // Start consumer threads
   std::vector<std::thread> consumers;
   int numConsumers = std::thread::hardware_concurrency();
+  if (numConsumers == 0)
+  {
+    numConsumers = 1;
+  }
   for (int i = 0; i < numConsumers; ++i)
   {
     consumers.emplace_back(frameConsumer, std::ref(blockReplaceManipulator), std::ref(finished));
@@ -245,7 +371,7 @@ int main(int argc, char *argv[])
   cap.release();
   writer.release();
 
-  std::cout << "Processing complete. Output saved to: " << outputFilePath << std::endl;
+  std::cout << "Processing complete. Output video saved to: " << outputFilePath << std::endl;
 
   return 0;
 }
