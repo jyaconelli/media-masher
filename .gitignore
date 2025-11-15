@@ -39,3 +39,18 @@
 
 # debug information files
 *.dwo
+
+# Build dir
+build/
+
+# vscode
+.vscode/
+
+# generated assets
+assets/
+*.jpeg
+*.mp4
+
+# Mac files
+.DS_Store
+
